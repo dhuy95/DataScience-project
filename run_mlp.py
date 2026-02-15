@@ -39,7 +39,7 @@ import pandas as pd
 import numpy as np
 from sklearn.neural_network import MLPClassifier
 from sklearn.model_selection import GroupKFold
-from sklearn.metrics import accuracy_score, classification_report, f1_score
+from sklearn.metrics import accuracy_score, classification_report, f1_score, recall_score
 from sklearn.preprocessing import StandardScaler
 
 # --- Constants & Configuration ---
@@ -81,7 +81,12 @@ def train_mlp(X, y, groups):
     print("\n--- Training MLP (Neural Network) ---")
     
     gkf = GroupKFold(n_splits=5)
-    metrics = {'acc': [], 'macro_f1': []}
+    metrics = {
+        'acc': [], 
+        'macro_f1': [],
+        'recall_minus1': [],
+        'recall_1': []
+    }
     
     fold = 1
     for train_idx, val_idx in gkf.split(X, y, groups=groups):
@@ -107,7 +112,7 @@ def train_mlp(X, y, groups):
             batch_size=256,         # Mini-batch size for gradient updates
             learning_rate_init=0.001,
             max_iter=50,            # Max epochs (iterations)
-            early_stopping=True,    # Stop if no improvement
+            early_stopping=False,   # DISABLED TO PREVENT LEAKAGE (User Feedback)
             validation_fraction=0.1,
             n_iter_no_change=3,     # Patience for early stopping
             random_state=42,
@@ -119,11 +124,18 @@ def train_mlp(X, y, groups):
         y_pred = model.predict(X_val)
         
         # Evaluation
+        # Evaluation
         acc = accuracy_score(y_val, y_pred)
         f1 = f1_score(y_val, y_pred, average='macro')
+        recalls = recall_score(y_val, y_pred, labels=[-1, 1], average=None)
         
         metrics['acc'].append(acc)
         metrics['macro_f1'].append(f1)
+        metrics['recall_minus1'].append(recalls[0])
+        metrics['recall_1'].append(recalls[1])
+        
+        print(f"-> Accuracy: {acc:.4f}, Macro F1: {f1:.4f}")
+        print(f"   Recall (-1): {recalls[0]:.4f}, Recall (1): {recalls[1]:.4f}")
         
         if fold == 1:
             print("\n--- Fold 1 Classification Report (MLP) ---")
@@ -134,8 +146,10 @@ def train_mlp(X, y, groups):
     print("\n" + "="*40)
     print("     NEURAL NETWORK RESULTS (5-FOLD CV)")
     print("="*40)
-    print(f"Average Accuracy: {np.mean(metrics['acc']):.4f}")
-    print(f"Average Macro F1: {np.mean(metrics['macro_f1']):.4f}")
+    print(f"Average Accuracy:      {np.mean(metrics['acc']):.4f}")
+    print(f"Average Macro F1:      {np.mean(metrics['macro_f1']):.4f}")
+    print(f"Average Recall (-1):   {np.mean(metrics['recall_minus1']):.4f}")
+    print(f"Average Recall (1):    {np.mean(metrics['recall_1']):.4f}")
     print("="*40)
 
 if __name__ == "__main__":

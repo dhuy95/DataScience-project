@@ -32,7 +32,7 @@ import numpy as np
 from sklearn.model_selection import GroupKFold
 from sklearn.linear_model import LogisticRegression
 from sklearn.dummy import DummyClassifier
-from sklearn.metrics import accuracy_score, classification_report, f1_score, confusion_matrix
+from sklearn.metrics import accuracy_score, classification_report, f1_score, confusion_matrix, recall_score
 from sklearn.preprocessing import StandardScaler
 
 # --- Constants & Configuration ---
@@ -161,6 +161,10 @@ def train_baseline_models(X, y, groups):
         scores['logreg_acc'].append(accuracy_score(y_val, y_pred_logreg))
         scores['logreg_f1'].append(f1_score(y_val, y_pred_logreg, average='macro'))
         
+        recalls = recall_score(y_val, y_pred_logreg, labels=[-1, 1], average=None)
+        scores['logreg_recall_minus1'].append(recalls[0])
+        scores['logreg_recall_1'].append(recalls[1])
+        
         # Report for the first fold only to keep output clean
         if fold == 1:
             print("\n--- Fold 1 Detailed Report (Logistic Regression) ---")
@@ -179,6 +183,8 @@ def train_baseline_models(X, y, groups):
     print("-" * 40)
     print(f"Logistic Regression Accuracy: {np.mean(scores['logreg_acc']):.4f}")
     print(f"Logistic Regression Macro F1: {np.mean(scores['logreg_f1']):.4f}")
+    print(f"LogReg Recall (-1):           {np.mean(scores['logreg_recall_minus1']):.4f}")
+    print(f"LogReg Recall (1):            {np.mean(scores['logreg_recall_1']):.4f}")
     print("="*40)
     print("\nBenchmark Reference:")
     print("Challenge Benchmark: ~41.74% Accuracy")

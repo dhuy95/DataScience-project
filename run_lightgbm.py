@@ -35,7 +35,7 @@ import pandas as pd
 import numpy as np
 import lightgbm as lgb
 from sklearn.model_selection import GroupKFold
-from sklearn.metrics import accuracy_score, classification_report, f1_score, confusion_matrix
+from sklearn.metrics import accuracy_score, classification_report, f1_score, confusion_matrix, recall_score
 import matplotlib.pyplot as plt
 
 # --- Constants & Configuration ---
@@ -79,6 +79,12 @@ def load_and_preprocess():
     # The most recent price action (r52) might have more weight than r0.
     X['last_return'] = X['r52']
     
+    # Momentum: Return of the last 30 minutes (last 6 intervals: r47 to r52)
+    momentum_cols = [f'r{i}' for i in range(47, 53)]
+    X['momentum_30m'] = X[momentum_cols].sum(axis=1)
+    
+    X['spread'] = X['max_return'] - X['min_return']
+    
     y = data['reod']
     groups = data['day'] # For validation split
     
@@ -93,7 +99,14 @@ def train_lightgbm(X, y, groups):
     # Use 5 folds to ensure robust evaluation
     gkf = GroupKFold(n_splits=5)
     
-    metrics = {'acc': [], 'macro_f1': []}
+    gkf = GroupKFold(n_splits=5)
+    
+    metrics = {
+        'acc': [], 
+        'macro_f1': [],
+        'recall_minus1': [],
+        'recall_1': []
+    }
     feature_importance_df = pd.DataFrame()
     feature_importance_df["feature"] = X.columns
     
@@ -137,10 +150,19 @@ def train_lightgbm(X, y, groups):
         # Evaluation
         acc = accuracy_score(y_val, y_pred)
         f1 = f1_score(y_val, y_pred, average='macro')
+        
+        # Calculate per-class recall
+        # labels=[-1, 1] ensures we get recall specifically for these classes
+        # average=None returns an array [recall_-1, recall_1]
+        recalls = recall_score(y_val, y_pred, labels=[-1, 1], average=None)
+        
         metrics['acc'].append(acc)
         metrics['macro_f1'].append(f1)
+        metrics['recall_minus1'].append(recalls[0])
+        metrics['recall_1'].append(recalls[1])
         
         print(f"-> Accuracy: {acc:.4f}, Macro F1: {f1:.4f}")
+        print(f"   Recall (-1): {recalls[0]:.4f}, Recall (1): {recalls[1]:.4f}")
         
         # Store Feature Importance
         feature_importance_df[f"fold_{fold}"] = model.feature_importances_
@@ -160,8 +182,10 @@ def train_lightgbm(X, y, groups):
     print("\n" + "="*40)
     print("     LIGHTGBM RESULTS (5-FOLD CV)")
     print("="*40)
-    print(f"Average Accuracy: {avg_acc:.4f}")
-    print(f"Average Macro F1: {avg_f1:.4f}")
+    print(f"Average Accuracy:      {np.mean(metrics['acc']):.4f}")
+    print(f"Average Macro F1:      {np.mean(metrics['macro_f1']):.4f}")
+    print(f"Average Recall (-1):   {np.mean(metrics['recall_minus1']):.4f}")
+    print(f"Average Recall (1):    {np.mean(metrics['recall_1']):.4f}")
     print("="*40)
     
     # --- Interpretability: Feature Importance ---

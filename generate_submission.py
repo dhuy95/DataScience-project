@@ -68,6 +68,11 @@ def preprocess_features(data, is_train=True):
     X['max_return'] = X[return_cols].max(axis=1)
     X['sum_return'] = X[return_cols].sum(axis=1)
     X['last_return'] = X['r52']
+    
+    # Momentum: Return of the last 30 minutes
+    momentum_cols = [f'r{i}' for i in range(47, 53)]
+    X['momentum_30m'] = X[momentum_cols].sum(axis=1)
+    
     X['spread'] = X['max_return'] - X['min_return']
     
     if is_train:
@@ -85,10 +90,8 @@ def generate_submission():
     X, y = preprocess_features(train_df, is_train=True)
     X_test = preprocess_features(test_df, is_train=False)
     
-    # Split a small chunk for early stopping to avoid overfitting
-    # We use a random split here because we want the model to see as diverse a set of days as possible
-    # in the main training block.
-    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.05, random_state=42, shuffle=True)
+    # We use shuffle=False to respect time ordering (past -> future validation)
+    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.05, random_state=42, shuffle=False)
     
     print(f"Training LightGBM on {len(X_train)} samples...")
     model = lgb.LGBMClassifier(
