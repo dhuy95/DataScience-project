@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
-from sklearn.model_selection import GroupKFold
+from sklearn.model_selection import GroupKFold, train_test_split
 from sklearn.metrics import accuracy_score, f1_score, recall_score
 from sklearn.preprocessing import StandardScaler
 
@@ -33,7 +33,7 @@ TRAIN_OUTPUT_PATH = r'c:\Users\DANG HUY\OneDrive\Tài liệu\study\Master\Data
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class LSTMModel(nn.Module):
-    def __init__(self, input_size=1, hidden_size=64, num_layers=1, num_classes=3):
+    def __init__(self, input_size=1, hidden_size=64, num_layers=2, num_classes=3):
         super(LSTMModel, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
@@ -110,17 +110,70 @@ def train_rnn(data):
         y_val_t = torch.tensor(y_val, dtype=torch.long).to(DEVICE)
         
         # DataLoader
-        train_loader = DataLoader(TensorDataset(X_train_t, y_train_t), batch_size=64, shuffle=True)
+        train_loader = DataLoader(TensorDataset(X_train_t, y_train_t), batch_size=1024, shuffle=True)
         
-        # --- 2. Model Initialization ---
-        model = LSTMModel(input_size=1, hidden_size=64, num_layers=1, num_classes=3).to(DEVICE)
+        # --- 2. Dynamic Hyperparameter Tuning ---
+        # Test a couple of learning rates on an internal split
+        X_t_inner, X_v_inner, y_t_inner, y_v_inner = train_test_split(X_train, y_train, test_size=0.1, shuffle=False)
         
-        # Loss and Optimizer
-        # Class weights could be added here if needed: weight=torch.tensor([wt0, wt1, wt2])
+        X_t_inner_t = torch.tensor(X_t_inner.reshape(-1, 53, 1), dtype=torch.float32).to(DEVICE)
+        y_t_inner_t = torch.tensor(y_t_inner, dtype=torch.long).to(DEVICE)
+        X_v_inner_t = torch.tensor(X_v_inner.reshape(-1, 53, 1), dtype=torch.float32).to(DEVICE)
+        y_v_inner_t = torch.tensor(y_v_inner, dtype=torch.long).to(DEVICE)
+        
+        inner_train_loader = DataLoader(TensorDataset(X_t_inner_t, y_t_inner_t), batch_size=1024, shuffle=True)
+        
+        lrs_to_test = [1e-3, 5e-4]
+        best_lr = 1e-3
+        best_inner_acc = 0.0
+        
+        print(f"  [Internal Tuning] ", end="")
+        for test_lr in lrs_to_test:
+            model_inner = LSTMModel(input_size=1, hidden_size=64, num_layers=2, num_classes=3).to(DEVICE)
+            criterion_inner = nn.CrossEntropyLoss()
+            optimizer_inner = optim.Adam(model_inner.parameters(), lr=test_lr)
+            
+            # Quick train for 3 epochs
+            for _ in range(3):
+                model_inner.train()
+                for inputs, labels in inner_train_loader:
+                    optimizer_inner.zero_grad()
+                    outputs = model_inner(inputs)
+                    loss = criterion_inner(outputs, labels)
+                    loss.backward()
+                    optimizer_inner.step()
+            
+            model_inner.eval()
+            inner_correct = 0
+            inner_total = 0
+            # Test in batches to prevent OOM
+            inner_val_loader = DataLoader(TensorDataset(X_v_inner_t, y_v_inner_t), batch_size=1024, shuffle=False)
+            with torch.no_grad():
+                for v_inputs, v_labels in inner_val_loader:
+                    v_outputs = model_inner(v_inputs)
+                    _, v_preds = torch.max(v_outputs, 1)
+                    inner_correct += (v_preds == v_labels).sum().item()
+                    inner_total += v_labels.size(0)
+            
+            inner_acc = inner_correct / inner_total
+            
+            if inner_acc > best_inner_acc:
+                best_inner_acc = inner_acc
+                best_lr = test_lr
+                
+        print(f"Selected learning rate: {best_lr}")
+
+        # --- 3. Final Model Initialization & Training ---
+        # DataLoader for full fold training
+        X_train_t = torch.tensor(X_train.reshape(-1, 53, 1), dtype=torch.float32).to(DEVICE)
+        y_train_t = torch.tensor(y_train, dtype=torch.long).to(DEVICE)
+        
+        train_loader = DataLoader(TensorDataset(X_train_t, y_train_t), batch_size=1024, shuffle=True)
+        
+        model = LSTMModel(input_size=1, hidden_size=64, num_layers=2, num_classes=3).to(DEVICE)
         criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(model.parameters(), lr=0.001)
+        optimizer = optim.Adam(model.parameters(), lr=best_lr)
         
-        # --- 3. Training Loop (20 Epochs) ---
         best_val_acc = 0.0
         best_model_state = None
         
@@ -135,47 +188,63 @@ def train_rnn(data):
                 
             # Validation Step
             model.eval()
+            val_correct = 0
+            val_total = 0
+            val_loader = DataLoader(TensorDataset(X_val_t, y_val_t), batch_size=1024, shuffle=False)
+            
             with torch.no_grad():
-                val_outputs = model(X_val_t)
-                _, val_preds = torch.max(val_outputs, 1)
-                val_acc = (val_preds == y_val_t).float().mean().item()
+                for v_inputs, v_labels in val_loader:
+                    v_outputs = model(v_inputs)
+                    _, v_preds = torch.max(v_outputs, 1)
+                    val_correct += (v_preds == v_labels).sum().item()
+                    val_total += v_labels.size(0)
+            
+            val_acc = val_correct / val_total
                 
-                # Save best model logic
-                if val_acc > best_val_acc:
-                    best_val_acc = val_acc
-                    best_model_state = model.state_dict()
-                    
-            if (epoch+1) % 5 == 0:
-                print(f"  Epoch {epoch+1}/20 | Val Acc: {val_acc:.4f}")
+            # Save best model logic
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                best_model_state = model.state_dict()
+                
+        if (epoch+1) % 5 == 0:
+            print(f"  Epoch {epoch+1}/20 | Val Acc: {val_acc:.4f}")
 
         # --- 4. Final Evaluation (Best Model) ---
         model.load_state_dict(best_model_state)
         model.eval()
+        
+        all_preds = []
+        all_labels = []
+        val_loader = DataLoader(TensorDataset(X_val_t, y_val_t), batch_size=1024, shuffle=False)
+        
         with torch.no_grad():
-            outputs = model(X_val_t)
-            _, preds = torch.max(outputs, 1)
+            for v_inputs, v_labels in val_loader:
+                outputs = model(v_inputs)
+                _, preds = torch.max(outputs, 1)
+                all_preds.extend(preds.cpu().numpy())
+                all_labels.extend(v_labels.cpu().numpy())
             
-            # Move to CPU for metrics
-            y_true_cpu = y_val_t.cpu().numpy()
-            y_pred_cpu = preds.cpu().numpy()
+        # Move to CPU for metrics
+        y_true_cpu = np.array(all_labels)
+        y_pred_cpu = np.array(all_preds)
+        
+        # Remap back to -1, 0, 1 for consistent reporting with other scripts
+        # 0 -> -1, 1 -> 0, 2 -> 1
+        y_true_orig = y_true_cpu - 1
+        y_pred_orig = y_pred_cpu - 1
             
-            # Remap back to -1, 0, 1 for consistent reporting with other scripts
-            # 0 -> -1, 1 -> 0, 2 -> 1
-            y_true_orig = y_true_cpu - 1
-            y_pred_orig = y_pred_cpu - 1
-            
-            acc = accuracy_score(y_true_orig, y_pred_orig)
-            f1 = f1_score(y_true_orig, y_pred_orig, average='macro')
-            # labels=[-1, 1] for recall
-            recalls = recall_score(y_true_orig, y_pred_orig, labels=[-1, 1], average=None)
-            
-            metrics['acc'].append(acc)
-            metrics['macro_f1'].append(f1)
-            metrics['recall_minus1'].append(recalls[0])
-            metrics['recall_1'].append(recalls[1])
-            
-            print(f"-> Best Acc: {acc:.4f}, Macro F1: {f1:.4f}")
-            print(f"   Recall (-1): {recalls[0]:.4f}, Recall (1): {recalls[1]:.4f}")
+        acc = accuracy_score(y_true_orig, y_pred_orig)
+        f1 = f1_score(y_true_orig, y_pred_orig, average='macro')
+        # labels=[-1, 1] for recall
+        recalls = recall_score(y_true_orig, y_pred_orig, labels=[-1, 1], average=None)
+        
+        metrics['acc'].append(acc)
+        metrics['macro_f1'].append(f1)
+        metrics['recall_minus1'].append(recalls[0])
+        metrics['recall_1'].append(recalls[1])
+        
+        print(f"-> Best Acc: {acc:.4f}, Macro F1: {f1:.4f}")
+        print(f"   Recall (-1): {recalls[0]:.4f}, Recall (1): {recalls[1]:.4f}")
             
         fold += 1
 

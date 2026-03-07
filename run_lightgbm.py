@@ -36,6 +36,9 @@ import numpy as np
 import lightgbm as lgb
 from sklearn.model_selection import GroupKFold
 from sklearn.metrics import accuracy_score, classification_report, f1_score, confusion_matrix, recall_score
+from sklearn.model_selection import train_test_split
+import scipy.stats
+import random
 import matplotlib.pyplot as plt
 
 # --- Constants & Configuration ---
@@ -63,27 +66,57 @@ def load_and_preprocess():
     return_cols = [f'r{i}' for i in range(53)]
     X = data[return_cols].fillna(0)
     
+    # --- Advanced Features (from anhNgoc.ipynb) ---
+    arr = X.values
+    
     # 1. Volatility Measures (std, spread)
     # High volatility might precede a breakout (up or down).
-    X['std_return'] = X[return_cols].std(axis=1)
-    X['min_return'] = X[return_cols].min(axis=1)
-    X['max_return'] = X[return_cols].max(axis=1)
+    X['std_return'] = np.std(arr, axis=1, ddof=1)
+    X['min_return'] = np.min(arr, axis=1)
+    X['max_return'] = np.max(arr, axis=1)
     X['spread'] = X['max_return'] - X['min_return']
     
     # 2. Trend Measures (mean, sum)
     # Captures the existing momentum of the stock over the 4.5h period.
-    X['mean_return'] = X[return_cols].mean(axis=1)
-    X['sum_return'] = X[return_cols].sum(axis=1)
+    X['mean_return'] = np.mean(arr, axis=1)
+    X['sum_return'] = np.sum(arr, axis=1)
     
     # 3. Recency Measures (last return)
     # The most recent price action (r52) might have more weight than r0.
-    X['last_return'] = X['r52']
+    X['last_return'] = arr[:, 52]
     
     # Momentum: Return of the last 30 minutes (last 6 intervals: r47 to r52)
-    momentum_cols = [f'r{i}' for i in range(47, 53)]
-    X['momentum_30m'] = X[momentum_cols].sum(axis=1)
+    X['momentum_30m'] = np.sum(arr[:, 47:53], axis=1)
     
-    X['spread'] = X['max_return'] - X['min_return']
+    half = 53 // 2
+    
+    X['mean_first_half'] = np.mean(arr[:, :half], axis=1)
+    X['mean_second_half'] = np.mean(arr[:, half:], axis=1)
+    X['std_first_half'] = np.std(arr[:, :half], axis=1, ddof=1)
+    X['std_second_half'] = np.std(arr[:, half:], axis=1, ddof=1)
+    
+    X['momentum_shift'] = X['mean_second_half'] - X['mean_first_half']
+    X['volatility_shift'] = X['std_second_half'] - X['std_first_half']
+    
+    chunk_size = 50000
+    skew_vals = []
+    kurt_vals = []
+    for i in range(0, arr.shape[0], chunk_size):
+        chunk = arr[i:i+chunk_size]
+        skew_vals.append(scipy.stats.skew(chunk, axis=1))
+        kurt_vals.append(scipy.stats.kurtosis(chunk, axis=1))
+        
+    X['skew'] = np.concatenate(skew_vals)
+    X['kurtosis'] = np.concatenate(kurt_vals)
+    
+    X['q25'] = np.quantile(arr, 0.25, axis=1)
+    X['q75'] = np.quantile(arr, 0.75, axis=1)
+    X['iqr'] = X['q75'] - X['q25']
+    X['median'] = np.median(arr, axis=1)
+    
+    X['pos_count'] = np.sum(arr > 0, axis=1)
+    X['neg_count'] = np.sum(arr < 0, axis=1)
+    X['zero_count'] = np.sum(arr == 0, axis=1)
     
     y = data['reod']
     groups = data['day'] # For validation split
@@ -118,20 +151,42 @@ def train_lightgbm(X, y, groups):
         X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
         y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
         
-        # --- Model Configuration ---
-        # n_estimators=1000: Maximum number of trees.
-        # learning_rate=0.05: Step size shrinkage significantly prevents overfitting.
-        # num_leaves=31: Controls the complexity of the tree model.
-        # class_weight='balanced': Automatically adjusts weights inversely to class frequencies.
+        # --- Dynamic Hyperparameter Tuning ---
+        # Test a few random combinations on an internal validation set (last 10% of train to respect time somewhat)
+        X_t_inner, X_v_inner, y_t_inner, y_v_inner = train_test_split(X_train, y_train, test_size=0.1, shuffle=False)
+        
+        param_grid = [
+            {'num_leaves': 31, 'learning_rate': 0.05, 'subsample': 1.0, 'colsample_bytree': 1.0},
+            {'num_leaves': 63, 'learning_rate': 0.05, 'subsample': 0.8, 'colsample_bytree': 0.8, 'reg_alpha': 0.1, 'reg_lambda': 0.1},
+            {'num_leaves': 15, 'learning_rate': 0.1,  'subsample': 0.9, 'colsample_bytree': 0.9}
+        ]
+        
+        best_f1 = -1
+        best_params = param_grid[0]
+        
+        print("\n   [Internal Tuning] ", end="")
+        for params in param_grid:
+            model_inner = lgb.LGBMClassifier(
+                n_estimators=100, # Quick evaluation
+                max_depth=-1, class_weight='balanced', random_state=42, n_jobs=-1, verbose=-1, **params
+            )
+            model_inner.fit(X_t_inner, y_t_inner, eval_set=[(X_v_inner, y_v_inner)], callbacks=[lgb.early_stopping(20, verbose=False)])
+            f1_inner = f1_score(y_v_inner, model_inner.predict(X_v_inner), average='macro')
+            if f1_inner > best_f1:
+                best_f1 = f1_inner
+                best_params = params
+                
+        print(f"Selected params: {best_params}")
+        
+        # --- Final Model Training for this Fold ---
         model = lgb.LGBMClassifier(
             n_estimators=1000,
-            learning_rate=0.05,
-            num_leaves=31,
-            max_depth=-1,           # No limit on depth, controlled by leaves
+            max_depth=-1,           
             class_weight='balanced',
             random_state=42,
             n_jobs=-1,
-            verbose=-1
+            verbose=-1,
+            **best_params
         )
         
         # Early Stopping: Stop training if validation score doesn't improve for 50 rounds

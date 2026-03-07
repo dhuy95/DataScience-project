@@ -118,7 +118,8 @@ def train_baseline_models(X, y, groups):
     # Store metrics to average later
     scores = {
         'dummy_acc': [], 'dummy_f1': [],
-        'logreg_acc': [], 'logreg_f1': []
+        'logreg_acc': [], 'logreg_f1': [],
+        'logreg_recall_minus1': [], 'logreg_recall_1': []
     }
     
     fold = 1
